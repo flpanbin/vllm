@@ -854,6 +854,7 @@ def wait_for_kv_layer_from_connector(layer_name: str):
     if attn_metadata is None:
         return
     assert isinstance(attn_metadata, dict)
+    logger.info("KVConnector(wait_for_layer_load) layer=%s", layer_name)
     connector.wait_for_layer_load(layer_name)
 
 
@@ -871,6 +872,7 @@ def maybe_save_kv_layer_to_connector(
     if attn_metadata is None:
         return
     assert isinstance(attn_metadata, dict)
+    logger.info("KVConnector(save_kv_layer) layer=%s", layer_name)
     connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata[layer_name])
 
 

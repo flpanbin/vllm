@@ -36,18 +36,47 @@ logger = init_logger(__name__)
 # Defined as a kv connector functionality mixin for ModelRunner (GPU, TPU)
 class KVConnectorModelRunnerMixin:
     @staticmethod
+    def _summarize_kv_metadata(meta: object) -> dict[str, object]:
+        summary = {"type": type(meta).__name__}
+        for attr in (
+            "requests",
+            "reqs_to_recv",
+            "reqs_to_send",
+            "reqs_in_batch",
+            "reqs_not_processed",
+            "reqs_to_load",
+            "reqs_to_store",
+        ):
+            if not hasattr(meta, attr):
+                continue
+            value = getattr(meta, attr)
+            try:
+                summary[f"{attr}_count"] = len(value)
+            except Exception:
+                summary[f"{attr}_present"] = True
+        return summary
+
+    @staticmethod
     def maybe_setup_kv_connector(scheduler_output: "SchedulerOutput"):
         # Update KVConnector with the KVConnector metadata forward().
         if has_kv_transfer_group():
             kv_connector = get_kv_transfer_group()
             assert isinstance(kv_connector, KVConnectorBase)
             assert scheduler_output.kv_connector_metadata is not None
+            logger.info(
+                "KVConnector(worker.bind) meta=%s finished_req_ids=%d",
+                KVConnectorModelRunnerMixin._summarize_kv_metadata(
+                    scheduler_output.kv_connector_metadata
+                ),
+                len(scheduler_output.finished_req_ids),
+            )
             kv_connector.bind_connector_metadata(scheduler_output.kv_connector_metadata)
 
             # Background KV cache transfers happen here.
             # These transfers are designed to be async and the requests
             # involved may be disjoint from the running requests.
             # Do this here to save a collective_rpc.
+            logger.info("KVConnector(worker.start_load_kv) begin")
             kv_connector.start_load_kv(get_forward_context())
 
     @staticmethod
@@ -66,6 +95,10 @@ class KVConnectorModelRunnerMixin:
         scheduler_output: "SchedulerOutput",
     ) -> tuple[set[str] | None, set[str] | None]:
         if has_kv_transfer_group():
+            logger.info(
+                "KVConnector(get_finished) finished_req_ids=%d",
+                len(scheduler_output.finished_req_ids),
+            )
             return get_kv_transfer_group().get_finished(
                 scheduler_output.finished_req_ids
             )
@@ -114,17 +147,26 @@ class KVConnectorModelRunnerMixin:
         kv_connector = get_kv_transfer_group()
         assert isinstance(kv_connector, KVConnectorBase)
         assert scheduler_output.kv_connector_metadata is not None
+        logger.info(
+            "KVConnector(worker.bind) meta=%s finished_req_ids=%d",
+            KVConnectorModelRunnerMixin._summarize_kv_metadata(
+                scheduler_output.kv_connector_metadata
+            ),
+            len(scheduler_output.finished_req_ids),
+        )
         kv_connector.bind_connector_metadata(scheduler_output.kv_connector_metadata)
 
         # Background KV cache transfers happen here.
         # These transfers are designed to be async and the requests
         # involved may be disjoint from the running requests.
         # Do this here to save a collective_rpc.
+        logger.info("KVConnector(worker.start_load_kv) begin")
         kv_connector.start_load_kv(get_forward_context())
         try:
             yield output
         finally:
             if wait_for_save:
+                logger.info("KVConnector(worker.wait_for_save) waiting")
                 kv_connector.wait_for_save()
 
             output.finished_sending, output.finished_recving = (
@@ -135,10 +177,20 @@ class KVConnectorModelRunnerMixin:
             output.kv_connector_stats = (
                 KVConnectorModelRunnerMixin.get_kv_connector_stats()
             )
+            logger.info(
+                "KVConnector(worker.output) finished_sending=%s "
+                "finished_recving=%s invalid_block_ids=%s stats=%s",
+                output.finished_sending,
+                output.finished_recving,
+                output.invalid_block_ids,
+                output.kv_connector_stats,
+            )
+            logger.info("KVConnector(clear_connector_metadata)")
             kv_connector.clear_connector_metadata()
 
     @staticmethod
     def get_kv_connector_stats() -> KVConnectorStats | None:
         if has_kv_transfer_group():
+            logger.info("KVConnector(get_kv_connector_stats) collecting")
             return get_kv_transfer_group().get_kv_connector_stats()
         return None

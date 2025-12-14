@@ -72,6 +72,11 @@ class KVConnectorLogging:
         # Note that this is not the same as the logging interval.
         # We expect transfer_stats_data to be aggregated across all workers and
         # consist of observations from a single connector or a MultiConnector.
+        logger.info(
+            "KVConnector(build_kv_connector_stats) connector=%s data_keys=%s",
+            self.connector_cls,
+            list(transfer_stats_data or {}),
+        )
         transfer_stats = self.connector_cls.build_kv_connector_stats(
             transfer_stats_data
         )

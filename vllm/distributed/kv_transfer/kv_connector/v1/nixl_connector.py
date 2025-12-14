@@ -238,6 +238,9 @@ class NixlConnector(KVConnectorBase_V1):
         Args:
             metadata (dict): the handshake metadata to set.
         """
+        logger.debug(
+            "NixlConnector.set_xfer_handshake_metadata with %d entries", len(metadata)
+        )
         assert self.connector_scheduler is not None
         self.connector_scheduler.set_xfer_handshake_metadata(metadata)
 
@@ -245,32 +248,57 @@ class NixlConnector(KVConnectorBase_V1):
     # Worker Side Methods
     ############################################################
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        logger.debug(
+            "NixlConnector.register_kv_caches layers=%s", list(kv_caches.keys())
+        )
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
+        logger.debug("NixlConnector.set_host_xfer_buffer_ops called")
         assert self.connector_worker is not None
         self.connector_worker.set_host_xfer_buffer_ops(copy_operation)
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
-        return self.connector_worker.get_finished()
+        logger.debug(
+            "NixlConnector.get_finished called with finished_req_ids=%s",
+            finished_req_ids,
+        )
+        done = self.connector_worker.get_finished()
+        logger.debug("NixlConnector.get_finished returning %s", done)
+        return done
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get block IDs that failed to load via NIXL."""
         assert self.connector_worker is not None
-        return self.connector_worker.get_block_ids_with_load_errors()
+        block_ids = self.connector_worker.get_block_ids_with_load_errors()
+        if block_ids:
+            logger.warning(
+                "NixlConnector.get_block_ids_with_load_errors found %d blocks: %s",
+                len(block_ids),
+                block_ids,
+            )
+        else:
+            logger.debug("NixlConnector.get_block_ids_with_load_errors found none")
+        return block_ids
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         if self.connector_worker is None:
             return None
-        return self.connector_worker.get_kv_connector_stats()
+        stats = self.connector_worker.get_kv_connector_stats()
+        logger.debug("NixlConnector.get_kv_connector_stats stats_present=%s", bool(stats))
+        return stats
 
     @classmethod
     def build_kv_connector_stats(
         cls, data: dict[str, Any] | None = None
     ) -> KVConnectorStats | None:
+        logger.debug(
+            "NixlConnector.build_kv_connector_stats called data_present=%s",
+            data is not None,
+        )
         return (
             NixlKVConnectorStats(data=data)
             if data is not None
@@ -285,6 +313,11 @@ class NixlConnector(KVConnectorBase_V1):
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[str]],
     ) -> KVConnectorPromMetrics:
+        logger.debug(
+            "NixlConnector.build_prom_metrics called labelnames=%s per_engine_labelvalues=%s",
+            labelnames,
+            per_engine_labelvalues,
+        )
         return NixlPromMetrics(
             vllm_config, metric_types, labelnames, per_engine_labelvalues
         )
@@ -292,11 +325,12 @@ class NixlConnector(KVConnectorBase_V1):
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
+        logger.debug("NixlConnector.start_load_kv metadata=%s", self._connector_metadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """NixlConnector does not do layerwise saving."""
-        pass
+        logger.debug("NixlConnector.wait_for_layer_load(%s) no-op", layer_name)
 
     def save_kv_layer(
         self,
@@ -306,15 +340,21 @@ class NixlConnector(KVConnectorBase_V1):
         **kwargs,
     ) -> None:
         """NixlConnector does not save explicitly."""
-        pass
+        logger.debug("NixlConnector.save_kv_layer(%s) no-op", layer_name)
 
     def wait_for_save(self):
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
+        logger.debug(
+            "NixlConnector.wait_for_save use_host_buffer=%s copy_blocks=%s",
+            self.connector_worker.use_host_buffer,
+            bool(self.connector_worker.copy_blocks),
+        )
         if self.connector_worker.use_host_buffer and self.connector_worker.copy_blocks:
             self.connector_worker.save_kv_to_host(self._connector_metadata)
 
     def shutdown(self):
+        logger.info("NixlConnector.shutdown called")
         if self.connector_worker is not None:
             self.connector_worker.shutdown()
         if self.connector_scheduler is not None:
@@ -331,7 +371,12 @@ class NixlConnector(KVConnectorBase_V1):
             None if no handshake metadata is available.
         """
         assert self.connector_worker is not None
-        return self.connector_worker.xfer_handshake_metadata
+        metadata = self.connector_worker.xfer_handshake_metadata
+        logger.debug(
+            "NixlConnector.get_handshake_metadata returning metadata_present=%s",
+            metadata is not None,
+        )
+        return metadata
 
 
 class NixlConnectorScheduler:
@@ -545,12 +590,22 @@ class NixlConnectorScheduler:
                 assert num_external_tokens == 0
             # Only trigger 1 KV transfer per request.
             params["do_remote_prefill"] = False
+            params["testKey2"] = "update_state_after_alloc"
 
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
         meta = NixlConnectorMetadata()
+        logger.info(
+            "NixlConnector.build_connector_meta recv=%s save=%s send=%s "
+            "in_batch=%s not_processed=%s",
+            list(self._reqs_need_recv),
+            list(self._reqs_need_save),
+            list(self._reqs_need_send),
+            list(self._reqs_in_batch),
+            list(self._reqs_not_processed),
+        )
 
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
@@ -576,6 +631,13 @@ class NixlConnectorScheduler:
         meta.reqs_to_send = self._reqs_need_send
         meta.reqs_in_batch = self._reqs_in_batch
         meta.reqs_not_processed = self._reqs_not_processed
+        logger.info(
+            "NixlConnector.build_connector_meta returning recv=%d save=%d "
+            "send=%d",
+            len(meta.reqs_to_recv),
+            len(meta.reqs_to_save),
+            len(meta.reqs_to_send),
+        )
 
         # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()
@@ -643,15 +705,23 @@ class NixlConnectorScheduler:
                 time.perf_counter() + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
             )
 
-        return delay_free_blocks, dict(
+        result = dict(
             do_remote_prefill=True,
             do_remote_decode=False,
+            testKey1="request_finished",
             remote_block_ids=block_ids,
             remote_engine_id=self.engine_id,
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
         )
+        logger.info(
+            "NixlConnector.request_finished req=%s delay_free=%s params=%s",
+            request.request_id,
+            delay_free_blocks,
+            result,
+        )
+        return delay_free_blocks, result
 
 
 class NixlConnectorWorker:

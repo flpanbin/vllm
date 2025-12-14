@@ -206,14 +206,18 @@ async def _handle_completions(api: str, request: Request):
 
         # Extract the needed fields
         response_json = response.json()
+        logger.info("response_json %s",response_json)
+
         kv_transfer_params = response_json.get("kv_transfer_params", {})
         if kv_transfer_params:
             req_data["kv_transfer_params"] = kv_transfer_params
 
+        logger.info("response.kv_transfer_params %s",kv_transfer_params)
         # Get the next decode client in round-robin fashion
         decode_client_info = get_next_client(request.app, "decode")
-
-        logger.debug("Using %s %s", prefill_client_info, decode_client_info)
+        # kv_transfer_params["do_remote_prefill"]=True
+        # kv_transfer_params["do_remote_decode"]=False
+        logger.info("Using %s %s", prefill_client_info, decode_client_info)
 
         # Stream response from decode service
         async def generate_stream():

@@ -410,6 +410,12 @@ class Scheduler(SchedulerInterface):
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
+                        logger.info(
+                            "KVConnector(get_num_new_matched_tokens) "
+                            "req=%s num_local_computed=%d",
+                            request.request_id,
+                            num_new_local_computed_tokens,
+                        )
                         ext_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
                                 request, num_new_local_computed_tokens
@@ -528,6 +534,16 @@ class Scheduler(SchedulerInterface):
                         new_computed_blocks + new_blocks,
                         num_external_computed_tokens,
                     )
+                    logger.info(
+                        "KVConnector(update_state_after_alloc) req=%s "
+                        "num_external_tokens=%d total_blocks=%s",
+                        request.request_id,
+                        num_external_computed_tokens,
+                        [
+                            len(group or ())
+                            for group in (new_computed_blocks + new_blocks).get_block_ids()  # type: ignore[arg-type]
+                        ],
+                    )
                     self._update_connector_prefix_cache_stats(
                         request, num_external_computed_tokens
                     )
@@ -644,7 +660,20 @@ class Scheduler(SchedulerInterface):
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
         if self.connector is not None:
+            logger.info(
+                "KVConnector(build_meta) scheduled_new=%d cached=%d "
+                "finished=%d finished_recving=%d failed_recving=%d",
+                len(new_reqs_data),
+                len(cached_reqs_data.req_ids),
+                len(self.finished_req_ids),
+                len(self.finished_recving_kv_req_ids),
+                len(self.failed_recving_kv_req_ids),
+            )
             meta = self.connector.build_connector_meta(scheduler_output)
+            logger.info(
+                "KVConnector(build_meta) produced %s",
+                self._summarize_kv_connector_meta(meta),
+            )
             scheduler_output.kv_connector_metadata = meta
 
         self._update_after_schedule(scheduler_output)
@@ -908,6 +937,7 @@ class Scheduler(SchedulerInterface):
             kv_connector_output.kv_connector_stats if kv_connector_output else None
         )
         if kv_connector_stats and self.connector:
+            logger.info("KVConnector(get_kv_connector_stats) scheduler side collect")
             kv_stats = self.connector.get_kv_connector_stats()
             if kv_stats:
                 kv_connector_stats = kv_connector_stats.aggregate(kv_stats)
@@ -1045,6 +1075,7 @@ class Scheduler(SchedulerInterface):
 
         # collect KV cache events from connector
         if self.connector is not None:
+            logger.info("KVConnector(take_events) collecting")
             connector_events = self.connector.take_events()
             if connector_events:
                 if events is None:
@@ -1310,6 +1341,27 @@ class Scheduler(SchedulerInterface):
     def get_kv_connector(self) -> KVConnectorBase_V1 | None:
         return self.connector
 
+    @staticmethod
+    def _summarize_kv_connector_meta(meta: Any) -> dict[str, Any]:
+        summary = {"type": type(meta).__name__}
+        for attr in (
+            "requests",
+            "reqs_to_recv",
+            "reqs_to_send",
+            "reqs_in_batch",
+            "reqs_not_processed",
+            "reqs_to_load",
+            "reqs_to_store",
+        ):
+            if not hasattr(meta, attr):
+                continue
+            value = getattr(meta, attr)
+            try:
+                summary[f"{attr}_count"] = len(value)
+            except Exception:
+                summary[f"{attr}_present"] = True
+        return summary
+
     def _connector_finished(
         self, request: Request
     ) -> tuple[bool, dict[str, Any] | None]:
@@ -1323,6 +1375,13 @@ class Scheduler(SchedulerInterface):
             return False, None
 
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
+        block_counts = [len(ids or ()) for ids in block_ids]
+        logger.info(
+            "KVConnector(request_finished) req=%s status=%s block_groups=%s",
+            request.request_id,
+            request.status,
+            block_counts,
+        )
 
         if not isinstance(self.connector, SupportsHMA):
             # NOTE(Kuntai): We should deprecate this code path after we enforce
@@ -1330,9 +1389,26 @@ class Scheduler(SchedulerInterface):
             # Hybrid memory allocator should be already turned off for this
             # code path, but let's double-check here.
             assert len(self.kv_cache_config.kv_cache_groups) == 1
-            return self.connector.request_finished(request, block_ids[0])
+            delay_free, params = self.connector.request_finished(
+                request, block_ids[0]
+            )
+            logger.info(
+                "KVConnector(request_finished) result delay_free=%s params=%s",
+                delay_free,
+                params,
+            )
+            return delay_free, params
 
-        return self.connector.request_finished_all_groups(request, block_ids)
+        delay_free, params = self.connector.request_finished_all_groups(
+            request, block_ids
+        )
+        logger.info(
+            "KVConnector(request_finished_all_groups) result delay_free=%s "
+            "params=%s",
+            delay_free,
+            params,
+        )
+        return delay_free, params
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
         """
@@ -1392,13 +1468,24 @@ class Scheduler(SchedulerInterface):
         """
 
         if self.connector is not None:
+            logger.info("KVConnector(update_connector_output) applying output")
             self.connector.update_connector_output(kv_connector_output)
 
+        finished_recving = set(kv_connector_output.finished_recving or ())
+        finished_sending = set(kv_connector_output.finished_sending or ())
+        invalid_blocks = set(kv_connector_output.invalid_block_ids or ())
+        logger.info(
+            "KVConnector(finished) recv=%d send=%d invalid_blocks=%d",
+            len(finished_recving),
+            len(finished_sending),
+            len(invalid_blocks),
+        )
+
         # KV Connector:: update recv and send status from last step.
-        for req_id in kv_connector_output.finished_recving or ():
+        for req_id in finished_recving:
             logger.debug("Finished recving KV transfer for request %s", req_id)
             self.finished_recving_kv_req_ids.add(req_id)
-        for req_id in kv_connector_output.finished_sending or ():
+        for req_id in finished_sending:
             logger.debug("Finished sending KV transfer for request %s", req_id)
             assert req_id in self.requests
             self._free_blocks(self.requests[req_id])

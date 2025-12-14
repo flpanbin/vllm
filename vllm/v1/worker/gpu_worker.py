@@ -367,6 +367,11 @@ class Worker(WorkerBase):
             return None
 
         tp_rank = get_tp_group().rank_in_group
+        logger.info(
+            "KVConnector(get_handshake_metadata) tp_rank=%d meta_type=%s",
+            tp_rank,
+            type(metadata).__name__,
+        )
         return {tp_rank: metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:

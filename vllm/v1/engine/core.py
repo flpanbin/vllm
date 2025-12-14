@@ -182,6 +182,10 @@ class EngineCore:
                 for worker_dict in xfer_handshake_metadata:
                     if worker_dict is not None:
                         content.update(worker_dict)
+                logger.info(
+                    "KVConnector(set_xfer_handshake_metadata) entries=%d",
+                    len(content),
+                )
                 kv_connector.set_xfer_handshake_metadata(content)
 
         # Setup batch queue for pipeline parallelism.
